@@ -183,6 +183,12 @@ def student(sid):
     )
     return jsonify({"student_id": sid, "name": rows[0]["name"], "subjects": subs})
 
+@app.route("/api/student/<sid>", methods=["DELETE"])
+def delete_student(sid):
+    cur = db().execute("DELETE FROM records WHERE student_id=?", (sid,))
+    db().commit()
+    return jsonify({"deleted": cur.rowcount})
+
 
 def insert_rows(rows):
     db().executemany(
