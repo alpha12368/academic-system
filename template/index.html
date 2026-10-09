@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Academic Early Warning System</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<style>
+  :root { --bg:#f4f6fb; --card:#fff; --ink:#1f2937; --muted:#6b7280; --brand:#4f46e5;
+          --low:#16a34a; --med:#f59e0b; --high:#dc2626; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:system-ui,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--ink); }
+  header { background:var(--brand); color:#fff; padding:16px 24px; }
+  header h1 { margin:0; font-size:1.3rem; } header p { margin:4px 0 0; opacity:.85; font-size:.9rem; }
+  main { max-width:1200px; margin:0 auto; padding:20px; }
+  .grid { display:grid; gap:16px; }
+  .kpis { grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); }
+  .two { grid-template-columns:repeat(auto-fit,minmax(340px,1fr)); margin-top:16px; }
+  .card { background:var(--card); border-radius:12px; padding:16px; box-shadow:0 1px 3px rgba(0,0,0,.08); }
+  .kpi b { display:block; font-size:1.8rem; } .kpi span { color:var(--muted); font-size:.85rem; }
+  h2 { font-size:1rem; margin:0 0 12px; }
+  button, input, select { font:inherit; padding:8px 12px; border-radius:8px; border:1px solid #d1d5db; }
+  button { background:var(--brand); color:#fff; border:0; cursor:pointer; }
+  button.sec { background:#e5e7eb; color:var(--ink); } button.danger { background:var(--high); }
+  .bar { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  table { width:100%; border-collapse:collapse; font-size:.9rem; }
+  th, td { text-align:left; padding:8px; border-bottom:1px solid #eee; }
+  th { color:var(--muted); font-weight:600; } tr.click { cursor:pointer; } tr.click:hover { background:#f9fafb; }
+  .badge { padding:2px 10px; border-radius:999px; color:#fff; font-size:.78rem; font-weight:600; }
+  .Low { background:var(--low); } .Medium { background:var(--med); } .High { background:var(--high); }
+  .modal { position:fixed; inset:0; background:rgba(0,0,0,.5); display:none; align-items:center;
+           justify-content:center; padding:16px; z-index:10; }
+  .modal.open { display:flex; }
+  .modal .box { background:#fff; border-radius:14px; max-width:820px; width:100%; max-height:90vh;
+                overflow:auto; padding:20px; }
+  .sub { border:1px solid #eee; border-radius:10px; padding:10px 12px; margin-top:10px; }
+  .sub ul { margin:6px 0 0; padding-left:18px; } .muted { color:var(--muted); font-size:.85rem; }
+  .empty { text-align:center; padding:40px; color:var(--muted); }
+  details { margin-top:16px; } summary { cursor:pointer; font-weight:600; }
+  form.add { display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr)); gap:8px; margin-top:10px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Academic Performance &amp; Early Warning System</h1>
+  <p>Track marks and attendance, spot at-risk students and subjects early, and act on recommendations.</p>
+</header>
+<main>
+  <div class="card bar">
+    <input type="file" id="file" accept=".csv">
+    <button onclick="uploadCsv()">Upload CSV</button>
+    <button class="sec" onclick="loadDemo()">Load demo data</button>
+    <button class="danger" onclick="resetAll()">Clear all</button>
+    <span class="muted" id="msg"></span>
+  </div>
+  <details class="card" style="margin-top:16px">
+    <summary>Add a single record / CSV format</summary>
+    <p class="muted">CSV columns: <code>student_id,name,subject,exam_no,marks,max_marks,attendance</code>
+      (max_marks defaults to 100, attendance is optional).</p>
+    <form class="add" onsubmit="addRecord(event)">
+      <input name="student_id" placeholder="Student ID" required>
+      <input name="name" placeholder="Name" required>
+      <input name="subject" placeholder="Subject" required>
+      <input name="exam_no" type="number" placeholder="Exam no." required>
+      <input name="marks" type="number" step="any" placeholder="Marks" required>
+      <input name="max_marks" type="number" step="any" placeholder="Max (100)">
+      <input name="attendance" type="number" step="any" placeholder="Attendance %">
+      <button>Add</button>
+    </form>
+  </details>
+
+  <div id="dash" style="margin-top:16px"></div>
+</main>
+
+<div class="modal" id="modal" onclick="if(event.target===this)closeModal()">
+  <div class="box" id="modalBox"></div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const COLORS = ['#4f46e5','#16a34a','#f59e0b','#dc2626','#0ea5e9','#a855f7','#14b8a6'];
+let charts = {}, students = [];
+
+function say(t) { $('msg').textContent = t; }
+
+async function uploadCsv() {
+  const f = $('file').files[0];
+  if (!f) return say('Choose a CSV file first.');
+  const fd = new FormData(); fd.append('file', f);
+  const r = await (await fetch('/api/upload', {method:'POST', body:fd})).json();
+  say(r.error || `Added ${r.added} rows` + (r.errors.length ? ` (${r.errors.length} skipped)` : ''));
+  refresh();
+}
+async function loadDemo() { await fetch('/api/demo', {method:'POST'}); say('Demo data loaded'); refresh(); }
+async function resetAll() {
+  if (!confirm('Delete all records?')) return;
+  await fetch('/api/reset', {method:'POST'}); say('Cleared'); refresh();
+}
+async function addRecord(e) {
+  e.preventDefault();
+  const body = Object.fromEntries(new FormData(e.target));
+  const r = await fetch('/api/record', {method:'POST', body:JSON.stringify(body)});
+  say(r.ok ? 'Record added' : 'Invalid input'); if (r.ok) { e.target.reset(); refresh(); }
+}
+
+function drawChart(id, cfg) {
+  if (charts[id]) charts[id].destroy();
+  charts[id] = new Chart($(id), cfg);
+}
+
+async function refresh() {
+  const d = await (await fetch('/api/summary')).json();
+  students = d.students;
+  if (!d.students.length) {
+    $('dash').innerHTML = '<div class="card empty">No data yet. Upload a CSV or click “Load demo data”.</div>';
+    return;
+  }
+  const k = d.kpis;
+  $('dash').innerHTML = `
+    <div class="grid kpis">
+      <div class="card kpi"><b>${k.students}</b><span>Students tracked</span></div>
+      <div class="card kpi"><b>${k.avg}%</b><span>Overall average</span></div>
+      <div class="card kpi"><b style="color:var(--high)">${k.high}</b><span>High-risk students</span></div>
+      <div class="card kpi"><b style="color:var(--med)">${k.medium}</b><span>Medium-risk students</span></div>
+    </div>
+    <div class="grid two">
+      <div class="card"><h2>Risk distribution</h2><canvas id="c1" height="200"></canvas></div>
+      <div class="card"><h2>Average marks by subject (weakest first)</h2><canvas id="c2" height="200"></canvas></div>
+    </div>
+    <div class="grid two">
+      <div class="card"><h2>Subjects needing attention</h2>
+        <table><tr><th>Subject</th><th>Avg</th><th>At risk</th></tr>
+        ${d.subjects.map(s => `<tr><td>${esc(s.subject)}</td><td>${s.avg}%</td>
+          <td>${s.students_at_risk} / ${s.total}</td></tr>`).join('')}</table></div>
+      <div class="card"><h2>Students</h2>
+        <div class="bar" style="margin-bottom:8px">
+          <input id="q" placeholder="Search name / ID" oninput="renderStudents()">
+          <select id="lv" onchange="renderStudents()"><option value="">All risk levels</option>
+            <option>High</option><option>Medium</option><option>Low</option></select></div>
+        <div style="max-height:360px;overflow:auto"><table id="st"></table></div></div>
+    </div>`;
+  drawChart('c1', {type:'doughnut', data:{labels:['Low','Medium','High'],
+    datasets:[{data:[d.distribution.Low,d.distribution.Medium,d.distribution.High],
+      backgroundColor:['#16a34a','#f59e0b','#dc2626']}]}});
+  drawChart('c2', {type:'bar', data:{labels:d.subjects.map(s=>s.subject),
+    datasets:[{label:'Avg %', data:d.subjects.map(s=>s.avg), backgroundColor:'#4f46e5'}]},
+    options:{scales:{y:{min:0,max:100}}, plugins:{legend:{display:false}}}});
+  renderStudents();
+}
+
+function renderStudents() {
+  const q = ($('q')?.value || '').toLowerCase(), lv = $('lv')?.value || '';
+  const rows = students.filter(s => (!lv || s.risk === lv) &&
+    (s.name.toLowerCase().includes(q) || s.student_id.toLowerCase().includes(q)));
+  $('st').innerHTML = '<tr><th>Student</th><th>Avg</th><th>Attend.</th><th>Risk</th></tr>' +
+    rows.map(s => `<tr class="click" onclick="openStudent('${esc(s.student_id)}')">
+      <td>${esc(s.name)}<br><span class="muted">${esc(s.student_id)}${s.weak_subjects.length ? ' · ' + esc(s.weak_subjects.join(', ')) : ''}</span></td>
+      <td>${s.avg}%</td><td>${s.attendance ?? '–'}${s.attendance != null ? '%' : ''}</td>
+      <td><span class="badge ${s.risk}">${s.risk} (${s.risk_score})</span></td></tr>`).join('');
+}
+
+async function openStudent(id) {
+  const d = await (await fetch('/api/student/' + encodeURIComponent(id))).json();
+  $('modalBox').innerHTML = `
+    <div class="bar" style="justify-content:space-between"><h2 style="font-size:1.2rem">${esc(d.name)} <span class="muted">(${esc(d.student_id)})</span></h2>
+    <button class="sec" onclick="closeModal()">Close</button></div>
+    <canvas id="c3" height="130"></canvas>
+    ${d.subjects.map(s => `<div class="sub">
+      <b>${esc(s.subject)}</b> <span class="badge ${s.risk}">${s.risk}</span>
+      <span class="muted"> avg ${s.avg}% · latest ${s.latest}% · trend ${s.trend > 0 ? '+' : ''}${s.trend}/exam
+      ${s.predicted != null ? '· predicted next ' + s.predicted + '%' : ''}
+      ${s.attendance != null ? '· attendance ' + s.attendance + '%' : ''}</span>
+      ${s.reasons.length ? `<div class="muted">Why: ${esc(s.reasons.join('; '))}</div>` : ''}
+      <ul>${s.tips.map(t => `<li>${esc(t)}</li>`).join('')}</ul></div>`).join('')}`;
+  $('modal').classList.add('open');
+  const labels = [...new Set(d.subjects.flatMap(s => s.exams))].sort((a,b)=>a-b);
+  drawChart('c3', {type:'line', data:{labels:labels.map(e=>'Exam '+e),
+    datasets:d.subjects.map((s,i) => ({label:s.subject, borderColor:COLORS[i%COLORS.length],
+      backgroundColor:COLORS[i%COLORS.length], tension:.25,
+      data:labels.map(e => { const j = s.exams.indexOf(e); return j<0 ? null : s.scores[j]; })}))},
+    options:{scales:{y:{min:0,max:100}}}});
+}
+function closeModal() { $('modal').classList.remove('open'); }
+refresh();
+</script>
+</body>
+</html>
